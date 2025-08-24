@@ -1,0 +1,7 @@
+CompileFlags:
+    Add: [
+        -c,
+        --offload-arch=native,
+        -xhip,
+        -I/root/rocm-samples
+    ]
