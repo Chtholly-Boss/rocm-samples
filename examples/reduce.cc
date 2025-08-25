@@ -27,8 +27,7 @@ __device__ __forceinline__ void warp_reduce_sum(float (&val)[VecSize]) {
 
 template <bool shfl, int ThreadsPerBlock = 256, int VecSize = 1>
 __global__ void kReduceIntraBlock(float *in, float *out, int N, float *g_reduce_buf) {
-    using VT = typename std::conditional<
-        VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
+    typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
     constexpr auto NumWarps = ThreadsPerBlock / warpSize;
     __shared__ float smem_reduce[NumWarps];
 
@@ -42,7 +41,7 @@ __global__ void kReduceIntraBlock(float *in, float *out, int N, float *g_reduce_
     auto gid           = bid * ThreadsPerBlock + tid;
     float sum[VecSize] = {0.0f};
     if (gid * VecSize < N) {
-        *reinterpret_cast<VT *>(sum) = *reinterpret_cast<VT *>(in + gid * VecSize);
+        *reinterpret_cast<vXf32 *>(sum) = *reinterpret_cast<vXf32 *>(in + gid * VecSize);
     }
     warp_reduce_sum<shfl>(sum);
     if (laneid == master_lane) {
@@ -65,8 +64,7 @@ __global__ void kReduceIntraBlock(float *in, float *out, int N, float *g_reduce_
 
 template <bool shfl, int ThreadsPerBlock = 256, int VecSize = 1>
 __global__ void kReduceInterBlock(float *g_reduce_buf, float *out, int num_blocks) {
-    using VT = typename std::conditional<
-        VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
+    typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
     constexpr auto NumWarps = ThreadsPerBlock / warpSize;
 
     __shared__ float smem_reduce[NumWarps];
@@ -78,11 +76,8 @@ __global__ void kReduceInterBlock(float *g_reduce_buf, float *out, int num_block
     constexpr auto master_lane = shfl ? 0 : (warpSize - 1);
     float sum[VecSize]         = {0.0f};
     float reg_in[VecSize];
-    // for (int i = tid; i < num_blocks; i += ThreadsPerBlock) {
-    //     sum[0] += g_reduce_buf[i];
-    // }
     for (int i = tid * VecSize; i < num_blocks; i += ThreadsPerBlock * VecSize) {
-        *reinterpret_cast<VT *>(reg_in) = *reinterpret_cast<VT *>(g_reduce_buf + i);
+        *reinterpret_cast<vXf32 *>(reg_in) = *reinterpret_cast<vXf32 *>(g_reduce_buf + i);
 #pragma unroll
         for (int j = 0; j < VecSize; j++) {
             sum[j] += reg_in[j];

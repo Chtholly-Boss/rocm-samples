@@ -3,6 +3,13 @@
 #include <tools/primitive.hh>
 #include <vector>
 
+/// @class Compressed Sparse Row Matrix
+/// @tparam VT Value Type
+/// @details
+///     - rows: row pointer array of size (nrows + 1)
+///     - cols: column index array of size (nnz)
+///     - vals: value array of size (nnz)
+/// @note Should be loaded from binary file
 template <typename VT> class CsrSpM {
   public:
     uint nrows;
@@ -55,6 +62,7 @@ template <typename VT> class CsrSpM {
         binFile.read(reinterpret_cast<char *>(cols), nnz * sizeof(uint));
         binFile.read(reinterpret_cast<char *>(vals), nnz * sizeof(double));
         binFile.close();
+        printf("nrows: %d, ncols: %d, nnz: %d\n", nrows, ncols, nnz);
     }
     ~CsrSpM() {
         if (rows)
@@ -83,11 +91,40 @@ int warmup_runs = 5;
 constexpr auto ThreadsPerBlock = 256u;
 int NUM_SM                     = 0;
 
+/// @brief Convert precision from SrcT to DstT
+/// @details Launched with ceil_div(N, ThreadsPerBlock) blocks
+/// @note only implicit conversion is supported
 template <typename DstT, typename SrcT>
 __global__ void kCvtPrecision(DstT *dst, SrcT *src, uint N) {
     auto i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < N) {
         dst[i] = src[i];
+    }
+}
+
+/// @brief Compute Y = values * X[colInd] element-wisely
+/// @details Launched with ceil_div(nnz, ThreadsPerBlock) blocks
+/// @note This kernel serves as an upper bound of SpMV performance
+template <int ThreadsPerBlock = 256, int VecSize = 1, typename T>
+__global__ void kValuesDotX(uint *colInd, T *values, T *X, T *Y, uint nnz) {
+    typedef T vXT __attribute__((ext_vector_type(VecSize)));
+    typedef uint vXu32 __attribute__((ext_vector_type(VecSize)));
+
+    auto gid = blockIdx.x * blockDim.x + threadIdx.x;
+    T res[VecSize];
+    T r_vals[VecSize];
+    uint r_colInd[VecSize];
+    if (gid * VecSize < nnz) {
+        *reinterpret_cast<vXT *>(r_vals)     = *reinterpret_cast<vXT *>(&values[gid * VecSize]);
+        *reinterpret_cast<vXu32 *>(r_colInd) = *reinterpret_cast<vXu32 *>(&colInd[gid * VecSize]);
+#pragma unroll
+        for (int i = 0; i < VecSize; i++) {
+            res[i] = r_vals[i] * X[r_colInd[i]];
+        }
+    }
+    /// prevent compiler optimizing away the whole kernel
+    if (threadIdx.x == 0) {
+        Y[0] = res[0];
     }
 }
 
@@ -233,6 +270,25 @@ int main(int argc, char *argv[]) {
         check_runtime_api(hipMemset(d_y_f, 0, mtx.nrows * sizeof(float)));
         return ret;
     };
+    profiler.add(
+        "ValuesDotX-d",
+        [&]() {
+            constexpr auto VecSize = 2;
+            kValuesDotX<ThreadsPerBlock, VecSize>
+                <<<divUp(mtx.nnz, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_cols, d_vals, d_x, d_y,
+                                                                       mtx.nnz);
+        },
+        nullptr, mtx.nnz * sizeof(double) + mtx.nrows * sizeof(uint), 0);
+
+    profiler.add(
+        "ValuesDotX-f",
+        [&]() {
+            constexpr auto VecSize = 2;
+            kValuesDotX<ThreadsPerBlock, VecSize>
+                <<<divUp(mtx.nnz, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_cols, d_vals_f, d_x_f,
+                                                                       d_y_f, mtx.nnz);
+        },
+        nullptr, mtx.nnz * sizeof(float) + mtx.nrows * sizeof(uint), 0);
     profiler.add(
         "dSpMV-V4",
         [&]() {

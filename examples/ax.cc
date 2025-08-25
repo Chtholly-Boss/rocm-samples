@@ -18,24 +18,22 @@ int NUM_SM                    = 0;
 
 template <int ThreadsPerBlock, int VecSize = 1>
 __global__ void kSax(const float *in, float *out, size_t size, float alpha) {
-    using VT = typename std::conditional<
-        VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
+    typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
     auto tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid * VecSize < size) {
         float r_in[VecSize], r_out[VecSize];
-        *reinterpret_cast<VT *>(r_in) = *reinterpret_cast<const VT *>(in + tid * VecSize);
+        *reinterpret_cast<vXf32 *>(r_in) = *reinterpret_cast<const vXf32 *>(in + tid * VecSize);
 #pragma unroll
         for (int j = 0; j < VecSize; j++) {
             r_out[j] = alpha * r_in[j];
         }
-        *reinterpret_cast<VT *>(out + tid * VecSize) = *reinterpret_cast<const VT *>(r_out);
+        *reinterpret_cast<vXf32 *>(out + tid * VecSize) = *reinterpret_cast<const vXf32 *>(r_out);
     }
 }
 
 template <int ThreadsPerBlock, int VecSize>
 __global__ void pkSax(const float *in, float *out, size_t size, float alpha) {
-    using VT = typename std::conditional<
-        VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
+    typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
 
     auto numel   = (size + gridDim.x - 1) / gridDim.x;
     auto b_start = blockIdx.x * numel;
@@ -45,12 +43,12 @@ __global__ void pkSax(const float *in, float *out, size_t size, float alpha) {
     float r_out[VecSize];
     auto tid = threadIdx.x;
     for (size_t i = b_start + tid * VecSize; i < b_end; i += ThreadsPerBlock * VecSize) {
-        *reinterpret_cast<VT *>(r_in) = *reinterpret_cast<const VT *>(in + i);
+        *reinterpret_cast<vXf32 *>(r_in) = *reinterpret_cast<const vXf32 *>(in + i);
 #pragma unroll
         for (int j = 0; j < VecSize; j++) {
             r_out[j] = alpha * r_in[j];
         }
-        *reinterpret_cast<VT *>(out + i) = *reinterpret_cast<const VT *>(r_out);
+        *reinterpret_cast<vXf32 *>(out + i) = *reinterpret_cast<const vXf32 *>(r_out);
     }
 }
 
@@ -132,21 +130,15 @@ int main(int argc, char *argv[]) {
         check_result, bytes, flops);
     profiler.add(
         "pSaxVec1",
-        [&]() {
-            pkSax<ThreadsPerBlock, 1><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha);
-        },
+        [&]() { pkSax<ThreadsPerBlock, 1><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha); },
         check_result, bytes, flops);
     profiler.add(
         "pSaxVec2",
-        [&]() {
-            pkSax<ThreadsPerBlock, 2><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha);
-        },
+        [&]() { pkSax<ThreadsPerBlock, 2><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha); },
         check_result, bytes, flops);
     profiler.add(
         "pSaxVec4",
-        [&]() {
-            pkSax<ThreadsPerBlock, 4><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha);
-        },
+        [&]() { pkSax<ThreadsPerBlock, 4><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha); },
         check_result, bytes, flops);
     profiler.runAll();
 
