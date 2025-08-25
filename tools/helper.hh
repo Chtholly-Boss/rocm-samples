@@ -15,6 +15,7 @@
         }                                                                                                              \
     }
 
+__host__ __device__ __forceinline__ 
 auto divUp(auto a, auto b) { return (a + b - 1) / b; }
 
 /// @brief Validate the output data on device against the reference data on host.

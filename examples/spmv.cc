@@ -81,6 +81,7 @@ int timed_runs  = 20;
 int warmup_runs = 5;
 
 constexpr auto ThreadsPerBlock = 256u;
+int NUM_SM                     = 0;
 
 template <typename DstT, typename SrcT>
 __global__ void kCvtPrecision(DstT *dst, SrcT *src, uint N) {
@@ -90,7 +91,8 @@ __global__ void kCvtPrecision(DstT *dst, SrcT *src, uint N) {
     }
 }
 
-/// \brief Vectorized SpMV kernel with @param GroupSize threads per row
+/// @brief Vectorized SpMV kernel with @param GroupSize threads per row
+/// @details Launched with ceil_div(num_rows, ThreadsPerBlock / GroupSize) blocks
 template <int ThreadsPerBlock = 256, int GroupSize = 4, typename T>
 __global__ void kVectorSubXSpMV(uint *rowPtr, uint *colInd, T *values, T *X, T *Y, uint N) {
     constexpr auto NumGroups = ThreadsPerBlock / GroupSize;
@@ -110,6 +112,32 @@ __global__ void kVectorSubXSpMV(uint *rowPtr, uint *colInd, T *values, T *X, T *
     }
     if (lane_id == 0) {
         Y[gid] = sum;
+    }
+}
+
+/// @brief Vectorized SpMV kernel with @param GroupSize threads per row
+/// @details Launched with NUM_SM blocks, each block processes ceil_div(num_rows, NUM_SM) rows
+template <int ThreadsPerBlock = 256, int GroupSize = 4, typename T>
+__global__ void pkVectorSubXSpMV(uint *rowPtr, uint *colInd, T *values, T *X, T *Y, uint N) {
+    constexpr auto NumGroups = ThreadsPerBlock / GroupSize;
+    auto tid                 = threadIdx.x;
+    auto group_id            = tid / GroupSize;
+    auto lane_id             = tid % GroupSize;
+    auto numel               = divUp(N, gridDim.x);
+    uint r_start             = blockIdx.x * numel;
+    uint r_end               = min(r_start + numel, N);
+    for (uint row = r_start + group_id; row < r_end; row += NumGroups) {
+        T sum = 0.0;
+        for (uint j = rowPtr[row] + lane_id; j < rowPtr[row + 1]; j += GroupSize) {
+            sum += values[j] * X[colInd[j]];
+        }
+#pragma unroll
+        for (int offset = GroupSize / 2; offset > 0; offset /= 2) {
+            sum += __shfl_down(sum, offset);
+        }
+        if (lane_id == 0) {
+            Y[row] = sum;
+        }
     }
 }
 
@@ -148,6 +176,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     mtx.loadFromBinary(argv[1]);
+    hipDeviceProp_t props;
+    check_runtime_api(hipGetDeviceProperties(&props, 0));
+    NUM_SM = props.multiProcessorCount;
 
     x.resize(mtx.ncols);
     ref_y.resize(mtx.nrows);
@@ -203,25 +234,6 @@ int main(int argc, char *argv[]) {
         return ret;
     };
     profiler.add(
-        "dSpMV-V1",
-        [&]() {
-            constexpr auto GroupSize = 1;
-            kVectorSubXSpMV<ThreadsPerBlock, GroupSize>
-                <<<divUp(mtx.nrows, ThreadsPerBlock / GroupSize), ThreadsPerBlock>>>(
-                    d_rows, d_cols, d_vals, d_x, d_y, mtx.nrows);
-        },
-        check_result_d, flops, bytes_double);
-    profiler.add(
-        "dSpMV-V2",
-        [&]() {
-            constexpr auto GroupSize = 2;
-            kVectorSubXSpMV<ThreadsPerBlock, GroupSize>
-                <<<divUp(mtx.nrows, ThreadsPerBlock / GroupSize), ThreadsPerBlock>>>(
-                    d_rows, d_cols, d_vals, d_x, d_y, mtx.nrows);
-        },
-        check_result_d, flops, bytes_double);
-
-    profiler.add(
         "dSpMV-V4",
         [&]() {
             constexpr auto GroupSize = 4;
@@ -232,26 +244,6 @@ int main(int argc, char *argv[]) {
         check_result_d, flops, bytes_double);
 
     profiler.add(
-        "sSpMV-V1",
-        [&]() {
-            constexpr auto GroupSize = 1;
-            kVectorSubXSpMV<ThreadsPerBlock, GroupSize, float>
-                <<<divUp(mtx.nrows, ThreadsPerBlock / GroupSize), ThreadsPerBlock>>>(
-                    d_rows, d_cols, d_vals_f, d_x_f, d_y_f, mtx.nrows);
-        },
-        check_result_f, flops, bytes_float);
-
-    profiler.add(
-        "sSpMV-V2",
-        [&]() {
-            constexpr auto GroupSize = 2;
-            kVectorSubXSpMV<ThreadsPerBlock, GroupSize, float>
-                <<<divUp(mtx.nrows, ThreadsPerBlock / GroupSize), ThreadsPerBlock>>>(
-                    d_rows, d_cols, d_vals_f, d_x_f, d_y_f, mtx.nrows);
-        },
-        check_result_f, flops, bytes_float);
-
-    profiler.add(
         "sSpMV-V4",
         [&]() {
             constexpr auto GroupSize = 4;
@@ -260,6 +252,24 @@ int main(int argc, char *argv[]) {
                     d_rows, d_cols, d_vals_f, d_x_f, d_y_f, mtx.nrows);
         },
         check_result_f, flops, bytes_float);
+
+    profiler.add(
+        "pk-dSpMV-V4",
+        [&]() {
+            constexpr auto VectorSize = 4;
+            pkVectorSubXSpMV<ThreadsPerBlock, VectorSize>
+                <<<NUM_SM, ThreadsPerBlock>>>(d_rows, d_cols, d_vals, d_x, d_y, mtx.nrows);
+        },
+        check_result_d, flops, bytes_double);
+    profiler.add(
+        "pk-sSpMV-V4",
+        [&]() {
+            constexpr auto VectorSize = 4;
+            pkVectorSubXSpMV<ThreadsPerBlock, VectorSize, float>
+                <<<NUM_SM, ThreadsPerBlock>>>(d_rows, d_cols, d_vals_f, d_x_f, d_y_f, mtx.nrows);
+        },
+        check_result_f, flops, bytes_float);
+
     profiler.runAll();
     {
         check_runtime_api(hipFree(d_rows));
