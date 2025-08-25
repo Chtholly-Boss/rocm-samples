@@ -121,12 +121,12 @@ class Profiler {
         float *l2_flush;
         check_runtime_api(hipMalloc(&l2_flush, l2_size_));
         for (auto &f : funcs) {
-            printf("==== %16s ====\n", f.name.c_str());
+            printf("name: %s\n", f.name.c_str());
             if (f.validate) {
                 f.launch();
                 check_runtime_api(hipDeviceSynchronize());
                 if (f.validate()) {
-                    printf("Validation PASSED\n");
+                    printf("Validation: PASSED\n");
                 }
             }
             for (int i = 0; i < warmup_runs_; i++) {

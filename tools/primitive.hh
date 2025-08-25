@@ -7,7 +7,8 @@
 /// @return The sum of all values in the warp stored in the lane `warpSize - 1`.
 /// @acknowledgement: Borrowed from
 /// https://medium.com/@hashem.hashemi/amds-dpp-operations-for-super-fast-reduction-29f9aa888376#
-/// @note To get best performance, the input value should be a vector type
+/// @note To get best performance, the input value should be a vector type to allow Instruction
+/// Interleaving.
 template <int VecSize = 1> __device__ void warp_reduce_sum_dpp(float (&val)[VecSize]) {
     constexpr int NOPS = VecSize > 2 ? 0 : (2 - VecSize);
     // Intra-row reduction
@@ -31,7 +32,20 @@ template <int VecSize = 1> __device__ void warp_reduce_sum_dpp(float (&val)[VecS
     for (int i = 0; i < VecSize; i++) {
         __v_add_f32_dpp_bcast(val[i], val[i], val[i], 31); // BCAST31
     }
-    if constexpr (NOPS > 0)
-        __nop<NOPS>();
     __nop<1>();
+}
+
+/// @brief Perform warp-level reduction using shuffle instructions.
+/// @return The sum of all values in the warp stored in the lane 0
+/// @note shuffle instructions on AMD GPUs indeed consists of multiple instructions, mainly built on
+/// `ds_permute`. But on NVIDIA GPUs, shuffle is commonly a single instruction.
+template <typename T, int VecSize = 1>
+__device__ __forceinline__ void warp_reduce_sum_shfl(T (&val)[VecSize]) {
+#pragma unroll
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+#pragma unroll
+        for (int i = 0; i < VecSize; i++) {
+            val[i] += __shfl_down(val[i], offset);
+        }
+    }
 }

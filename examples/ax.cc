@@ -21,7 +21,7 @@ __global__ void kSax(const float *in, float *out, size_t size, float alpha) {
     using VT = typename std::conditional<
         VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
     auto tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid * 4 < size) {
+    if (tid * VecSize < size) {
         float r_in[VecSize], r_out[VecSize];
         *reinterpret_cast<VT *>(r_in) = *reinterpret_cast<const VT *>(in + tid * VecSize);
 #pragma unroll

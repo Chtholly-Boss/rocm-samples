@@ -15,47 +15,43 @@ int timed_runs  = 20;
 int warmup_runs = 5;
 
 constexpr int ThreadsPerBlock = 256;
-int NUM_SM                    = 0;
 
-__global__ void kReduce_shfl(float *in, float *out, int size, float *g_reduce_buf) {}
-
-template <typename T> __device__ __forceinline__ T warp_reduce_sum_shfl(T val) {
-#pragma unroll
-    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-        val += __shfl_down(val, offset);
+template <bool shfl, int VecSize = 1>
+__device__ __forceinline__ void warp_reduce_sum(float (&val)[VecSize]) {
+    if constexpr (shfl) {
+        warp_reduce_sum_shfl(val);
+    } else {
+        warp_reduce_sum_dpp(val);
     }
-    return val;
 }
 
-template <bool shfl, int ThreadsPerBlock = 256>
-__global__ void kReduce(float *in, float *out, int N, float *g_reduce_buf) {
-    namespace cg = cooperative_groups;
-
-    constexpr auto NumWarps    = ThreadsPerBlock / warpSize;
-    constexpr auto master_lane = shfl ? 0 : (warpSize - 1);
+template <bool shfl, int ThreadsPerBlock = 256, int VecSize = 1>
+__global__ void kReduceIntraBlock(float *in, float *out, int N, float *g_reduce_buf) {
+    using VT = typename std::conditional<
+        VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
+    constexpr auto NumWarps = ThreadsPerBlock / warpSize;
     __shared__ float smem_reduce[NumWarps];
 
     auto bid    = blockIdx.x;
     auto tid    = threadIdx.x;
     auto laneid = __lane_id();
     auto warpid = tid / warpSize;
-    auto grid   = cg::this_grid();
-    /// 1st Phase: Intra-block reduction
-    auto numel   = (N + gridDim.x - 1) / gridDim.x;
-    auto b_start = bid * numel;
-    auto b_end   = min(b_start + numel, (unsigned)N);
 
-    float sum[1] = {0.0f};
-    for (int i = b_start + tid; i < b_end; i += ThreadsPerBlock) {
-        sum[0] += in[i];
+    constexpr auto master_lane = shfl ? 0 : (warpSize - 1);
+
+    auto gid           = bid * ThreadsPerBlock + tid;
+    float sum[VecSize] = {0.0f};
+    if (gid * VecSize < N) {
+        *reinterpret_cast<VT *>(sum) = *reinterpret_cast<VT *>(in + gid * VecSize);
     }
-    if constexpr (shfl) {
-        sum[0] = warp_reduce_sum_shfl(sum[0]);
-    } else {
-        warp_reduce_sum_dpp(sum);
-    }
+    warp_reduce_sum<shfl>(sum);
     if (laneid == master_lane) {
-        smem_reduce[warpid] = sum[0];
+        float acc = 0.0f;
+#pragma unroll
+        for (int i = 0; i < VecSize; i++) {
+            acc += sum[i];
+        }
+        smem_reduce[warpid] = acc;
     }
     __syncthreads();
     if (tid == 0) {
@@ -65,157 +61,49 @@ __global__ void kReduce(float *in, float *out, int N, float *g_reduce_buf) {
         }
         g_reduce_buf[bid] = sum;
     }
-
-    grid.sync();
-
-    /// 2nd Phase: Inter-block reduction
-    if (bid == 0) {
-        sum[0] = (tid < gridDim.x) ? g_reduce_buf[tid] : 0.0f;
-        if constexpr (shfl) {
-            sum[0] = warp_reduce_sum_shfl(sum[0]);
-        } else {
-            warp_reduce_sum_dpp(sum);
-        }
-        if (laneid == master_lane) {
-            smem_reduce[warpid] = sum[0];
-        }
-        __syncthreads();
-        if (tid == 0) {
-            float sum = 0.0f;
-            for (int i = 0; i < NumWarps; i++) {
-                sum += smem_reduce[i];
-            }
-            *out = sum;
-        }
-    }
 }
 
-template <int ThreadsPerBlock = 256, int VecSize = 1>
-__global__ void kReduce_vdpp(float *in, float *out, int N, float *g_reduce_buf) {
-    namespace cg = cooperative_groups;
-    using VT     = typename std::conditional<
-            VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
-    constexpr auto NumWarps    = ThreadsPerBlock / warpSize;
-    constexpr auto master_lane = warpSize - 1;
+template <bool shfl, int ThreadsPerBlock = 256, int VecSize = 1>
+__global__ void kReduceInterBlock(float *g_reduce_buf, float *out, int num_blocks) {
+    using VT = typename std::conditional<
+        VecSize == 4, float4, typename std::conditional<VecSize == 2, float2, float>::type>::type;
+    constexpr auto NumWarps = ThreadsPerBlock / warpSize;
 
     __shared__ float smem_reduce[NumWarps];
 
-    auto bid    = blockIdx.x;
     auto tid    = threadIdx.x;
     auto laneid = __lane_id();
     auto warpid = tid / warpSize;
-    auto grid   = cg::this_grid();
 
-    float acc[VecSize] = {0.0f};
-    /// 1st Phase: Intra-block reduction
-    auto numel   = (N + gridDim.x - 1) / gridDim.x;
-    auto b_start = bid * numel;
-    auto b_end   = min(b_start + numel, (unsigned)N);
-
-    float r_in[VecSize];
-    for (int i = b_start + tid * VecSize; i < b_end; i += ThreadsPerBlock * VecSize) {
-        *reinterpret_cast<VT *>(r_in) = *reinterpret_cast<const VT *>(&in[i]);
+    constexpr auto master_lane = shfl ? 0 : (warpSize - 1);
+    float sum[VecSize]         = {0.0f};
+    float reg_in[VecSize];
+    // for (int i = tid; i < num_blocks; i += ThreadsPerBlock) {
+    //     sum[0] += g_reduce_buf[i];
+    // }
+    for (int i = tid * VecSize; i < num_blocks; i += ThreadsPerBlock * VecSize) {
+        *reinterpret_cast<VT *>(reg_in) = *reinterpret_cast<VT *>(g_reduce_buf + i);
 #pragma unroll
-        for (int v = 0; v < VecSize; v++) {
-            acc[v] += r_in[v];
+        for (int j = 0; j < VecSize; j++) {
+            sum[j] += reg_in[j];
         }
     }
-    warp_reduce_sum_dpp(acc);
+    warp_reduce_sum<shfl>(sum);
     if (laneid == master_lane) {
+        float acc = 0.0f;
+#pragma unroll
+        for (int i = 0; i < VecSize; i++) {
+            acc += sum[i];
+        }
+        smem_reduce[warpid] = acc;
+    }
+    __syncthreads();
+    if (tid == 0) {
         float sum = 0.0f;
-#pragma unroll
-        for (int v = 0; v < VecSize; v++) {
-            sum += acc[v];
+        for (int i = 0; i < NumWarps; i++) {
+            sum += smem_reduce[i];
         }
-        smem_reduce[warpid] = sum;
-    }
-
-    grid.sync();
-
-    /// 2nd Phase: Inter-block reduction
-    if (bid == 0) {
-        float sum[1] = {0.0f};
-        sum[0]       = (tid < gridDim.x) ? g_reduce_buf[tid] : 0.0f;
-        warp_reduce_sum_dpp(sum);
-        if (laneid == master_lane) {
-            smem_reduce[warpid] = sum[0];
-        }
-        __syncthreads();
-        if (tid == 0) {
-            float sum = 0.0f;
-            for (int i = 0; i < NumWarps; i++) {
-                sum += smem_reduce[i];
-            }
-            *out = sum;
-        }
-    }
-}
-
-template <int ThreadsPerBlock = 256, int VecGroups = 1>
-__global__ void kReduce_vdpp_ext(float *in, float *out, int N, float *g_reduce_buf) {
-    namespace cg               = cooperative_groups;
-    constexpr int VecSize      = 4;
-    using VT                   = float4;
-    constexpr auto NumWarps    = ThreadsPerBlock / warpSize;
-    constexpr auto master_lane = warpSize - 1;
-
-    __shared__ float smem_reduce[NumWarps];
-
-    auto bid    = blockIdx.x;
-    auto tid    = threadIdx.x;
-    auto laneid = __lane_id();
-    auto warpid = tid / warpSize;
-    auto grid   = cg::this_grid();
-
-    float acc[VecSize] = {0.0f};
-    /// 1st Phase: Intra-block reduction
-    auto numel   = (N + gridDim.x - 1) / gridDim.x;
-    auto b_start = bid * numel;
-    auto b_end   = min(b_start + numel, (unsigned)N);
-
-    float r_in[VecGroups][VecSize];
-    for (int i = b_start + tid * VecGroups * VecSize; i < b_end;
-         i += ThreadsPerBlock * VecGroups * VecSize) {
-#pragma unroll
-        for (int g = 0; g < VecGroups; g++) {
-            *reinterpret_cast<VT *>(r_in[g]) = *reinterpret_cast<const VT *>(&in[i + g * VecSize]);
-        }
-#pragma unroll
-        for (int g = 0; g < VecGroups; g++) {
-#pragma unroll
-            for (int v = 0; v < VecSize; v++) {
-                acc[v] += r_in[g][v];
-            }
-        }
-    }
-    warp_reduce_sum_dpp(acc);
-    if (laneid == master_lane) {
-        float sum = 0.0f;
-#pragma unroll
-        for (int v = 0; v < VecSize; v++) {
-            sum += acc[v];
-        }
-        smem_reduce[warpid] = sum;
-    }
-
-    grid.sync();
-
-    /// 2nd Phase: Inter-block reduction
-    if (bid == 0) {
-        float sum[1] = {0.0f};
-        sum[0]       = (tid < gridDim.x) ? g_reduce_buf[tid] : 0.0f;
-        warp_reduce_sum_dpp(sum);
-        if (laneid == master_lane) {
-            smem_reduce[warpid] = sum[0];
-        }
-        __syncthreads();
-        if (tid == 0) {
-            float sum = 0.0f;
-            for (int i = 0; i < NumWarps; i++) {
-                sum += smem_reduce[i];
-            }
-            *out = sum;
-        }
+        *out = sum;
     }
 }
 
@@ -243,13 +131,16 @@ void run_baseline() {
     printf("Baseline: %f ms\n", ms / timed_runs);
 }
 
-int main(int argc, char *argv[]) {
-    hipDeviceProp_t props;
-    check_runtime_api(hipGetDeviceProperties(&props, 0));
-    printf("Device: %s\n", props.name);
-    NUM_SM = props.multiProcessorCount;
-    printf("NUM_SM=%d\n", NUM_SM);
+template <int VecSize = 1, bool shfl = true, typename T>
+void launch_reduce(T *d_in, T *d_out, int N, T *d_reduce_buf) {
+    auto num_blocks = divUp(N, ThreadsPerBlock * VecSize);
+    kReduceIntraBlock<shfl, ThreadsPerBlock, VecSize>
+        <<<num_blocks, ThreadsPerBlock>>>(d_in, d_out, N, d_reduce_buf);
+    kReduceInterBlock<shfl, ThreadsPerBlock, VecSize>
+        <<<1, ThreadsPerBlock>>>(d_reduce_buf, d_out, num_blocks);
+}
 
+int main(int argc, char *argv[]) {
     if (argc > 1)
         N = atoi(argv[1]);
     if (argc > 2)
@@ -266,70 +157,36 @@ int main(int argc, char *argv[]) {
     {
         check_runtime_api(hipMalloc(&d_in, N * sizeof(float)));
         check_runtime_api(hipMalloc(&d_out, sizeof(float)));
-        check_runtime_api(hipMalloc(&d_reduce_buf, NUM_SM * sizeof(float)));
+        check_runtime_api(hipMalloc(&d_reduce_buf, 1024 * sizeof(float)));
     }
 
     check_runtime_api(hipMemcpy(d_in, h_in.data(), N * sizeof(float), hipMemcpyHostToDevice));
-    auto check_result = [&]() { return validate(&h_out, d_out, 1); };
+    auto check_result = [&]() {
+        auto ret = validate(&h_out, d_out, 1);
+        check_runtime_api(hipMemset(d_out, 0, sizeof(float)));
+        return ret;
+    };
 
     size_t bytes = N * sizeof(float);
     size_t flops = N;
     Profiler profiler(timed_runs, warmup_runs);
     profiler.add(
-        "Reduce_shfl",
-        [&]() {
-            launchCooperativeKernel(kReduce<true>, NUM_SM, ThreadsPerBlock, 0, 0, d_in, d_out, N,
-                                    d_reduce_buf);
-        },
+        "Reduce_shfl", [&]() { launch_reduce<1, true>(d_in, d_out, N, d_reduce_buf); },
         check_result, bytes, flops);
     profiler.add(
-        "Reduce_dpp",
-        [&]() {
-            launchCooperativeKernel(kReduce<false>, NUM_SM, ThreadsPerBlock, 0, 0, d_in, d_out, N,
-                                    d_reduce_buf);
-        },
+        "Reduce_shfl_vec2", [&]() { launch_reduce<2, true>(d_in, d_out, N, d_reduce_buf); },
         check_result, bytes, flops);
     profiler.add(
-        "Reduce_vdpp_2",
-        [&]() {
-            launchCooperativeKernel(kReduce_vdpp<ThreadsPerBlock, 2>, NUM_SM, ThreadsPerBlock, 0, 0,
-                                    d_in, d_out, N, d_reduce_buf);
-        },
+        "Reduce_shfl_vec4", [&]() { launch_reduce<4, true>(d_in, d_out, N, d_reduce_buf); },
         check_result, bytes, flops);
     profiler.add(
-        "Reduce_vdpp_4",
-        [&]() {
-            launchCooperativeKernel(kReduce_vdpp<ThreadsPerBlock, 4>, NUM_SM, ThreadsPerBlock, 0, 0,
-                                    d_in, d_out, N, d_reduce_buf);
-        },
+        "Reduce_dpp", [&]() { launch_reduce<1, false>(d_in, d_out, N, d_reduce_buf); },
         check_result, bytes, flops);
     profiler.add(
-        "Reduce_vdpp_ext_2",
-        [&]() {
-            launchCooperativeKernel(kReduce_vdpp_ext<ThreadsPerBlock, 2>, NUM_SM, ThreadsPerBlock,
-                                    0, 0, d_in, d_out, N, d_reduce_buf);
-        },
+        "Reduce_dpp_vec2", [&]() { launch_reduce<2, false>(d_in, d_out, N, d_reduce_buf); },
         check_result, bytes, flops);
     profiler.add(
-        "Reduce_vdpp_ext_4",
-        [&]() {
-            launchCooperativeKernel(kReduce_vdpp_ext<ThreadsPerBlock, 4>, NUM_SM, ThreadsPerBlock,
-                                    0, 0, d_in, d_out, N, d_reduce_buf);
-        },
-        check_result, bytes, flops);
-    profiler.add(
-        "Reduce_vdpp_ext_8",
-        [&]() {
-            launchCooperativeKernel(kReduce_vdpp_ext<ThreadsPerBlock, 8>, NUM_SM, ThreadsPerBlock,
-                                    0, 0, d_in, d_out, N, d_reduce_buf);
-        },
-        check_result, bytes, flops);
-    profiler.add(
-        "Reduce_vdpp_ext_12",
-        [&]() {
-            launchCooperativeKernel(kReduce_vdpp_ext<ThreadsPerBlock, 12>, NUM_SM, ThreadsPerBlock,
-                                    0, 0, d_in, d_out, N, d_reduce_buf);
-        },
+        "Reduce_dpp_vec4", [&]() { launch_reduce<4, false>(d_in, d_out, N, d_reduce_buf); },
         check_result, bytes, flops);
     profiler.runAll();
 
