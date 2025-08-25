@@ -26,8 +26,8 @@ auto divUp(auto a, auto b) { return (a + b - 1) / b; }
 /// @return True if the output data matches the reference data within the given tolerances, false otherwise.
 template <typename HT, typename DT>
 bool validate(HT *h_ref, DT *d_out, size_t size, double atol = 1, double rtol = 1e-2) {
-    auto h_out = (HT *)malloc(size * sizeof(HT));
-    check_runtime_api(hipMemcpy(h_out, d_out, size * sizeof(HT), hipMemcpyDeviceToHost));
+    auto h_out = (DT *)malloc(size * sizeof(DT));
+    check_runtime_api(hipMemcpy(h_out, d_out, size * sizeof(DT), hipMemcpyDeviceToHost));
     for (size_t i = 0; i < size; i++) {
         auto abs_err = std::abs(h_ref[i] - h_out[i]);
         auto rel_err = h_ref[i] == 0 ? 0.0 : abs_err / std::abs(h_ref[i]);
