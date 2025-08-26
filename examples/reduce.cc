@@ -26,7 +26,7 @@ __device__ __forceinline__ void warp_reduce_sum(float (&val)[VecSize]) {
 }
 
 template <bool shfl, int ThreadsPerBlock = 256, int VecSize = 1>
-__global__ void kReduceIntraBlock(float *in, float *out, int N, float *g_reduce_buf) {
+__global__ void kReduceIntraBlock(float *in, float *g_reduce_buf, int N) {
     typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
     constexpr auto NumWarps = ThreadsPerBlock / warpSize;
     __shared__ float smem_reduce[NumWarps];
@@ -130,7 +130,7 @@ template <int VecSize = 1, bool shfl = true, typename T>
 void launch_reduce(T *d_in, T *d_out, int N, T *d_reduce_buf) {
     auto num_blocks = divUp(N, ThreadsPerBlock * VecSize);
     kReduceIntraBlock<shfl, ThreadsPerBlock, VecSize>
-        <<<num_blocks, ThreadsPerBlock>>>(d_in, d_out, N, d_reduce_buf);
+        <<<num_blocks, ThreadsPerBlock>>>(d_in, d_reduce_buf, N);
     kReduceInterBlock<shfl, ThreadsPerBlock, VecSize>
         <<<1, ThreadsPerBlock>>>(d_reduce_buf, d_out, num_blocks);
 }
@@ -152,7 +152,7 @@ int main(int argc, char *argv[]) {
     {
         check_runtime_api(hipMalloc(&d_in, N * sizeof(float)));
         check_runtime_api(hipMalloc(&d_out, sizeof(float)));
-        check_runtime_api(hipMalloc(&d_reduce_buf, 1024 * sizeof(float)));
+        check_runtime_api(hipMalloc(&d_reduce_buf, N * sizeof(float)));
     }
 
     check_runtime_api(hipMemcpy(d_in, h_in.data(), N * sizeof(float), hipMemcpyHostToDevice));
