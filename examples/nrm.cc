@@ -1,3 +1,4 @@
+#include "lib/rocblas.hh"
 #include <3rdparty/argparse.hpp>
 #include <tools/helper.hh>
 #include <tools/primitive.hh>
@@ -171,7 +172,7 @@ __global__ void kReduceInterBlock(float *g_reduce_buf, float *out, int num_block
         for (int i = 0; i < NumWarps; i++) {
             sum += smem_reduce[i];
         }
-        *out = 1.0f / sqrt(sum); //  1/nrm2 for normalization
+        *out = sqrt(sum); //  1/nrm2 for normalization
     }
 }
 
@@ -179,7 +180,7 @@ template <int ThreadsPerBlock, int VecSize = 1>
 __global__ void kSax(const float *in, float *out, size_t size, float *alpha) {
     typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
     auto tid     = blockIdx.x * blockDim.x + threadIdx.x;
-    auto alpha_v = *alpha;
+    auto alpha_v = 1.0f / *alpha;
     if (tid * VecSize < size) {
         float r_in[VecSize], r_out[VecSize];
         *reinterpret_cast<vXf32 *>(r_in) = *reinterpret_cast<const vXf32 *>(in + tid * VecSize);
@@ -189,6 +190,17 @@ __global__ void kSax(const float *in, float *out, size_t size, float *alpha) {
         }
         *reinterpret_cast<vXf32 *>(out + tid * VecSize) = *reinterpret_cast<const vXf32 *>(r_out);
     }
+}
+
+template <bool shfl, int VecSize>
+void launch_nrm2_multi_phase(const float *in, float *out, int N, float *reduce_buf) {
+    int num_blocks = divUp(N, ThreadsPerBlock * VecSize);
+    kReduceIntraBlock<shfl, ThreadsPerBlock, VecSize>
+        <<<num_blocks, ThreadsPerBlock>>>(const_cast<float *>(in), reduce_buf, N);
+    kReduceInterBlock<shfl, ThreadsPerBlock, VecSize>
+        <<<1, ThreadsPerBlock>>>(reduce_buf, reduce_buf, num_blocks); // write to buf[0]
+    kSax<ThreadsPerBlock, VecSize>
+        <<<divUp(N, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(in, out, N, reduce_buf);
 }
 
 void run_baseline() {
@@ -272,16 +284,26 @@ int main(int argc, char *argv[]) {
         },
         check_result, bytes, flops);
     profiler.add(
-        "kReduce + kSax",
-        [=]() {
+        "kNrm2-3phase-Vec-1",
+        [=]() { launch_nrm2_multi_phase<true, 1>(d_in, d_out, N, d_reduce_buf); }, check_result,
+        bytes, flops);
+    profiler.add(
+        "kNrm2-3phase-Vec-2",
+        [=]() { launch_nrm2_multi_phase<true, 2>(d_in, d_out, N, d_reduce_buf); }, check_result,
+        bytes, flops);
+    profiler.add(
+        "kNrm2-3phase-Vec-2",
+        [=]() { launch_nrm2_multi_phase<true, 4>(d_in, d_out, N, d_reduce_buf); }, check_result,
+        bytes, flops);
+    RocBlasLv1<float> rocblas;
+    profiler.add(
+        "rocblas",
+        [&]() {
             constexpr auto VecSize = 4;
-            int num_blocks         = divUp(N, ThreadsPerBlock * VecSize);
-            kReduceIntraBlock<true, ThreadsPerBlock, VecSize>
-                <<<num_blocks, ThreadsPerBlock>>>(d_in, d_reduce_buf, N);
-            kReduceInterBlock<true, ThreadsPerBlock, VecSize>
-                <<<1, ThreadsPerBlock>>>(d_reduce_buf, d_reduce_buf, num_blocks); // write to buf[0]
+            rocblas.nrm2(N, d_in, 1, d_reduce_buf);
             kSax<ThreadsPerBlock, VecSize>
-                <<<num_blocks, ThreadsPerBlock>>>(d_in, d_out, N, d_reduce_buf);
+                <<<divUp(N, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_in, d_out, N,
+                                                                           d_reduce_buf);
         },
         check_result, bytes, flops);
     profiler.runAll();

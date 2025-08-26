@@ -1,4 +1,5 @@
 #include <3rdparty/argparse.hpp>
+#include <lib/rocblas.hh>
 #include <tools/helper.hh>
 #include <vector>
 
@@ -107,6 +108,25 @@ int parse_args(int argc, char *argv[]) {
     return 0;
 }
 
+#define REGISTER_SAX(name, vec_size)                                                               \
+    profiler.add(                                                                                  \
+        name,                                                                                      \
+        [&]() {                                                                                    \
+            constexpr auto VecSize = vec_size;                                                     \
+            kSax<ThreadsPerBlock, VecSize>                                                         \
+                <<<divUp(N, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_in, d_out, N, alpha); \
+        },                                                                                         \
+        check_result, bytes, flops);
+
+#define REGISTER_PSAX(name, vec_size)                                                              \
+    profiler.add(                                                                                  \
+        name,                                                                                      \
+        [&]() {                                                                                    \
+            constexpr auto VecSize = vec_size;                                                     \
+            pkSax<ThreadsPerBlock, VecSize><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha);   \
+        },                                                                                         \
+        check_result, bytes, flops);
+
 int main(int argc, char *argv[]) {
     parse_args(argc, argv);
     h_in.resize(N);
@@ -126,39 +146,15 @@ int main(int argc, char *argv[]) {
 
     auto check_result = [&] { return validate_all(h_out.data(), d_out, h_out.size()); };
 
-    profiler.add(
-        "SaxVec1",
-        [&]() {
-            kSax<ThreadsPerBlock, 1>
-                <<<divUp(N, ThreadsPerBlock), ThreadsPerBlock>>>(d_in, d_out, N, alpha);
-        },
-        check_result, bytes, flops);
-    profiler.add(
-        "SaxVec2",
-        [&]() {
-            kSax<ThreadsPerBlock, 2>
-                <<<divUp(N, ThreadsPerBlock * 2), ThreadsPerBlock>>>(d_in, d_out, N, alpha);
-        },
-        check_result, bytes, flops);
-    profiler.add(
-        "SaxVec4",
-        [&]() {
-            kSax<ThreadsPerBlock, 4>
-                <<<divUp(N, ThreadsPerBlock * 4), ThreadsPerBlock>>>(d_in, d_out, N, alpha);
-        },
-        check_result, bytes, flops);
-    profiler.add(
-        "pSaxVec1",
-        [&]() { pkSax<ThreadsPerBlock, 1><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha); },
-        check_result, bytes, flops);
-    profiler.add(
-        "pSaxVec2",
-        [&]() { pkSax<ThreadsPerBlock, 2><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha); },
-        check_result, bytes, flops);
-    profiler.add(
-        "pSaxVec4",
-        [&]() { pkSax<ThreadsPerBlock, 4><<<NUM_SM, ThreadsPerBlock>>>(d_in, d_out, N, alpha); },
-        check_result, bytes, flops);
+    REGISTER_SAX("SaxVec1", 1);
+    REGISTER_SAX("SaxVec2", 2);
+    REGISTER_SAX("SaxVec4", 4);
+    REGISTER_PSAX("PSaxVec1", 1);
+    REGISTER_PSAX("PSaxVec2", 2);
+    REGISTER_PSAX("PSaxVec4", 4);
+
+    RocBlasLv1<float> rocblas;
+    profiler.add("rocBLAS", [&] { rocblas.scale(N, &alpha, d_out, 1); }, nullptr, bytes, flops);
     profiler.runAll();
 
     {
