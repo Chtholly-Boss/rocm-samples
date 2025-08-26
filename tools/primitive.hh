@@ -49,3 +49,16 @@ __device__ __forceinline__ void warp_reduce_sum_shfl(T (&val)[VecSize]) {
         }
     }
 }
+
+/// @brief Perform warp-level reduction using either shuffle or DPP instructions.
+/// @tparam shfl If true, use shuffle instructions; otherwise, use DPP instructions
+/// @tparam VecSize Number of elements in the vector to be reduced, potentially allowing instruction
+/// interleaving.
+template <bool shfl, int VecSize = 1>
+__device__ __forceinline__ void warp_reduce_sum(float (&val)[VecSize]) {
+    if constexpr (shfl) {
+        warp_reduce_sum_shfl(val);
+    } else {
+        warp_reduce_sum_dpp(val);
+    }
+}

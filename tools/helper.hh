@@ -6,41 +6,70 @@
 #include <random>
 #include <vector>
 
-#define check_runtime_api(call)                                                                                                \
-    {                                                                                                                  \
-        hipError_t err = call;                                                                                         \
-        if (err != hipSuccess) {                                                                                       \
-            fprintf(stderr, "HIP error in file '%s' in line %i : %s.\n", __FILE__, __LINE__, hipGetErrorString(err));  \
-            exit(EXIT_FAILURE);                                                                                        \
-        }                                                                                                              \
+#define check_runtime_api(call)                                                                    \
+    {                                                                                              \
+        hipError_t err = call;                                                                     \
+        if (err != hipSuccess) {                                                                   \
+            fprintf(stderr, "HIP error in file '%s' in line %i : %s.\n", __FILE__, __LINE__,       \
+                    hipGetErrorString(err));                                                       \
+            exit(EXIT_FAILURE);                                                                    \
+        }                                                                                          \
     }
 
-__host__ __device__ __forceinline__ 
-auto divUp(auto a, auto b) { return (a + b - 1) / b; }
+__host__ __device__ __forceinline__ auto divUp(auto a, auto b) { return (a + b - 1) / b; }
 
-/// @brief Validate the output data on device against the reference data on host.
+/// @brief Validate the output data on device against the reference data on host using element-wise
+/// comparison with given absolute and relative tolerances.
 /// @param h_ref Pointer to the reference data on host.
 /// @param d_out Pointer to the output data on device.
 /// @param size Number of elements to validate.
 /// @param atol Absolute tolerance.
 /// @param rtol Relative tolerance.
-/// @return True if the output data matches the reference data within the given tolerances, false otherwise.
+/// @return True if the output data matches the reference data within the given tolerances, false
+/// otherwise.
 template <typename HT, typename DT>
-bool validate(HT *h_ref, DT *d_out, size_t size, double atol = 1, double rtol = 1e-2) {
+bool validate_all(HT *h_ref, DT *d_out, size_t size, double atol = 1, double rtol = 1e-2) {
     auto h_out = (DT *)malloc(size * sizeof(DT));
     check_runtime_api(hipMemcpy(h_out, d_out, size * sizeof(DT), hipMemcpyDeviceToHost));
     for (size_t i = 0; i < size; i++) {
         auto abs_err = std::abs(h_ref[i] - h_out[i]);
         auto rel_err = h_ref[i] == 0 ? 0.0 : abs_err / std::abs(h_ref[i]);
-        if (abs_err > atol && rel_err > rtol) {
+        if (atol > 0 and abs_err > atol) {
             fprintf(stderr, "Failed at [%zu]:", i);
             std::cerr << "ref = " << h_ref[i] << ", out = " << h_out[i] << ", abs_err = " << abs_err
-                      << ", rel_err = " << rel_err << std::endl;
+                      << std::endl;
+            free(h_out);
+            return false;
+        }
+        if (rtol > 0 and rel_err > rtol) {
+            fprintf(stderr, "Failed at [%zu]:", i);
+            std::cerr << "ref = " << h_ref[i] << ", out = " << h_out[i] << ", rel_err = " << rel_err
+                      << std::endl;
             free(h_out);
             return false;
         }
     }
     free(h_out);
+    return true;
+}
+
+/// @brief Validate the output data on device against the reference data on host using RMSRE metric.
+template <typename HT, typename DT>
+bool validate_rmsre(HT *h_ref, DT *d_out, size_t size, double tol = 1e-2, double eps = 1e-12) {
+    auto h_out = (DT *)malloc(size * sizeof(DT));
+    check_runtime_api(hipMemcpy(h_out, d_out, size * sizeof(DT), hipMemcpyDeviceToHost));
+    double rmsre = 0.0;
+    for (size_t i = 0; i < size; i++) {
+        double denom   = std::abs(h_ref[i]) + eps;
+        double rel_err = (h_ref[i] - h_out[i]) / denom;
+        rmsre += rel_err * rel_err;
+    }
+    rmsre = std::sqrt(rmsre / size);
+    free(h_out);
+    if (rmsre > tol) {
+        std::cerr << "RMSRE " << rmsre << " exceeds tolerance " << tol << std::endl;
+        return false;
+    }
     return true;
 }
 
@@ -60,10 +89,11 @@ class CPUTimer {
 };
 
 template <typename Kernel, typename... Args>
-void launchCooperativeKernel(Kernel kernel, dim3 gridDim, dim3 blockDim, int smem_size, hipStream_t stream,
-                             Args... args) {
+void launchCooperativeKernel(Kernel kernel, dim3 gridDim, dim3 blockDim, int smem_size,
+                             hipStream_t stream, Args... args) {
     void *kernelArgs[] = {(void *)&args...};
-    check_runtime_api(hipLaunchCooperativeKernel((void *)(kernel), gridDim, blockDim, kernelArgs, smem_size, stream));
+    check_runtime_api(hipLaunchCooperativeKernel((void *)(kernel), gridDim, blockDim, kernelArgs,
+                                                 smem_size, stream));
 }
 
 class GPUTimer {

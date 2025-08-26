@@ -35,15 +35,6 @@ template <int GroupSize, typename T> __device__ __forceinline__ void warp_reduce
     }
 }
 
-template <bool shfl, int VecSize = 1>
-__device__ __forceinline__ void warp_reduce_sum(float (&val)[VecSize]) {
-    if constexpr (shfl) {
-        warp_reduce_sum_shfl(val);
-    } else {
-        warp_reduce_sum_dpp(val);
-    }
-}
-
 /// @brief Persistent kernel to perform Reduce + Axpy for normalization
 template <int ThreadsPerBlock = 256>
 __global__ void pkNormalize(const float *in, float *out, int N, float *g_reduce_buf) {
