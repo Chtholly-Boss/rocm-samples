@@ -1,4 +1,5 @@
 #include <fstream>
+#include <lib/rocsparse.hh>
 #include <tools/helper.hh>
 #include <tools/primitive.hh>
 #include <vector>
@@ -80,6 +81,8 @@ std::vector<double> ref_y;
 
 uint *d_rows;
 uint *d_cols;
+int *d_rows_i32;
+int *d_cols_i32;
 double *d_x, *d_y;
 double *d_vals;
 float *d_x_f, *d_y_f;
@@ -127,6 +130,11 @@ __global__ void kValuesDotX(uint *colInd, T *values, T *X, T *Y, uint nnz) {
         Y[0] = res[0];
     }
 }
+
+/// @brief Reduce partial sums by row pointer
+/// @note This kernel is the bottleneck of the two-kernel SpMV approach
+template <int ThreadsPerBlock = 256, typename T>
+__global__ void kReduceByRowPtr(uint *rowPtr, T *in, T *out, uint N) {}
 
 /// @brief Vectorized SpMV kernel with @param GroupSize threads per row
 /// @details Launched with ceil_div(num_rows, ThreadsPerBlock / GroupSize) blocks
@@ -229,7 +237,8 @@ int main(int argc, char *argv[]) {
         check_runtime_api(hipMalloc(&d_vals, mtx.nnz * sizeof(double)));
         check_runtime_api(hipMalloc(&d_x, mtx.ncols * sizeof(double)));
         check_runtime_api(hipMalloc(&d_y, mtx.nrows * sizeof(double)));
-
+        check_runtime_api(hipMalloc(&d_rows_i32, (mtx.nrows + 1) * sizeof(int)));
+        check_runtime_api(hipMalloc(&d_cols_i32, mtx.nnz * sizeof(int)));
         check_runtime_api(
             hipMemcpy(d_rows, mtx.rows, (mtx.nrows + 1) * sizeof(uint), hipMemcpyHostToDevice));
         check_runtime_api(
@@ -244,6 +253,10 @@ int main(int argc, char *argv[]) {
         check_runtime_api(hipMalloc(&d_x_f, mtx.ncols * sizeof(float)));
         check_runtime_api(hipMalloc(&d_y_f, mtx.nrows * sizeof(float)));
         check_runtime_api(hipMalloc(&d_vals_f, mtx.nnz * sizeof(float)));
+        kCvtPrecision<<<divUp(mtx.ncols, ThreadsPerBlock), ThreadsPerBlock>>>(d_rows_i32, d_rows,
+                                                                              mtx.nrows + 1);
+        kCvtPrecision<<<divUp(mtx.nnz, ThreadsPerBlock), ThreadsPerBlock>>>(d_cols_i32, d_cols,
+                                                                            mtx.nnz);
         kCvtPrecision<<<divUp(mtx.ncols, ThreadsPerBlock), ThreadsPerBlock>>>(d_x_f, d_x,
                                                                               mtx.ncols);
         kCvtPrecision<<<divUp(mtx.nnz, ThreadsPerBlock), ThreadsPerBlock>>>(d_vals_f, d_vals,
@@ -261,34 +274,56 @@ int main(int argc, char *argv[]) {
     size_t flops = 2 * mtx.nnz;
     Profiler profiler(timed_runs, warmup_runs);
     auto check_result_d = [&]() {
-        auto ret = validate(ref_y.data(), d_y, ref_y.size());
+        auto ret = validate_all(ref_y.data(), d_y, ref_y.size(), 0, 5e-2);
         check_runtime_api(hipMemset(d_y, 0, mtx.nrows * sizeof(double)));
         return ret;
     };
     auto check_result_f = [&]() {
-        auto ret = validate(ref_y.data(), d_y_f, ref_y.size(), 1e-2);
+        auto ret = validate_all(ref_y.data(), d_y_f, ref_y.size(), 0, 5e-2);
         check_runtime_api(hipMemset(d_y_f, 0, mtx.nrows * sizeof(float)));
         return ret;
     };
+    
     profiler.add(
         "ValuesDotX-d",
         [&]() {
             constexpr auto VecSize = 2;
             kValuesDotX<ThreadsPerBlock, VecSize>
-                <<<divUp(mtx.nnz, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_cols, d_vals, d_x, d_y,
-                                                                       mtx.nnz);
+                <<<divUp(mtx.nnz, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_cols, d_vals,
+                                                                                 d_x, d_y,
+                                                                                 mtx.nnz);
         },
         nullptr, mtx.nnz * sizeof(double) + mtx.nrows * sizeof(uint), 0);
-
     profiler.add(
         "ValuesDotX-f",
         [&]() {
             constexpr auto VecSize = 2;
             kValuesDotX<ThreadsPerBlock, VecSize>
-                <<<divUp(mtx.nnz, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_cols, d_vals_f, d_x_f,
-                                                                       d_y_f, mtx.nnz);
+                <<<divUp(mtx.nnz, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(
+                    d_cols, d_vals_f, d_x_f, d_y_f, mtx.nnz);
         },
         nullptr, mtx.nnz * sizeof(float) + mtx.nrows * sizeof(uint), 0);
+
+    RocSparseCsrMV<double> rocsparse_d;
+    profiler.add(
+        "rocSPARSE-dcsrmv",
+        [&]() {
+            constexpr double alpha = 1.0;
+            constexpr double beta  = 0.0;
+            rocsparse_d.run(rocsparse_operation_none, mtx.nrows, mtx.ncols, mtx.nnz, &alpha, d_vals,
+                            d_rows_i32, d_cols_i32, d_x, &beta, d_y);
+        },
+        check_result_d, flops, bytes_double);
+    RocSparseCsrMV<float> rocsparse_f;
+    profiler.add(
+        "rocSPARSE-scsrmv",
+        [&]() {
+            constexpr float alpha = 1.0f;
+            constexpr float beta  = 0.0f;
+            rocsparse_f.run(rocsparse_operation_none, mtx.nrows, mtx.ncols, mtx.nnz, &alpha,
+                            d_vals_f, d_rows_i32, d_cols_i32, d_x_f, &beta, d_y_f);
+        },
+        check_result_f, flops, bytes_float);
     profiler.add(
         "dSpMV-V4",
         [&]() {

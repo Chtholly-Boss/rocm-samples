@@ -212,3 +212,24 @@ template <typename T> class Randomizer {
         }
     }
 };
+
+/// \brief Formats a range of elements to a pretty string.
+/// \tparam BidirectionalIterator - must implement the BidirectionalIterator concept and
+/// must be dereferencable in host code. Its value type must be formattable to
+/// \p std::ostream.
+template<class BidirectionalIterator>
+inline std::string format_range(const BidirectionalIterator begin, const BidirectionalIterator end)
+{
+    std::stringstream sstream;
+    sstream << "[ ";
+    for(auto it = begin; it != end; ++it)
+    {
+        sstream << *it;
+        if(it != std::prev(end))
+        {
+            sstream << ", ";
+        }
+    }
+    sstream << " ]";
+    return sstream.str();
+}
