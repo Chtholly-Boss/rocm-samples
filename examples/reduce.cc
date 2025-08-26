@@ -1,7 +1,6 @@
+#include <3rdparty/argparse.hpp>
 #include "tools/primitive.hh"
-#include <hip/hip_cooperative_groups.h>
 #include <tools/helper.hh>
-#include <type_traits>
 #include <vector>
 
 std::vector<float> h_in;
@@ -15,15 +14,6 @@ int timed_runs  = 20;
 int warmup_runs = 5;
 
 constexpr int ThreadsPerBlock = 256;
-
-template <bool shfl, int VecSize = 1>
-__device__ __forceinline__ void warp_reduce_sum(float (&val)[VecSize]) {
-    if constexpr (shfl) {
-        warp_reduce_sum_shfl(val);
-    } else {
-        warp_reduce_sum_dpp(val);
-    }
-}
 
 template <bool shfl, int ThreadsPerBlock = 256, int VecSize = 1>
 __global__ void kReduceIntraBlock(float *in, float *g_reduce_buf, int N) {
@@ -135,14 +125,32 @@ void launch_reduce(T *d_in, T *d_out, int N, T *d_reduce_buf) {
         <<<1, ThreadsPerBlock>>>(d_reduce_buf, d_out, num_blocks);
 }
 
+int parse_args(int argc, char *argv[]) {
+    argparse::ArgumentParser prog("memcpy");
+    prog.add_argument("-n", "--size").help("vector size").required().scan<'i', int>();
+    prog.add_argument("-t", "--timed_runs")
+        .help("number of timed runs")
+        .default_value(20)
+        .scan<'i', int>();
+    prog.add_argument("-w", "--warmup_runs")
+        .help("number of warmup runs")
+        .default_value(10)
+        .scan<'i', int>();
+    try {
+        prog.parse_args(argc, argv);
+    } catch (const std::exception &err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << prog;
+        exit(1);
+    }
+    N           = prog.get<int>("--size");
+    timed_runs  = prog.get<int>("--timed_runs");
+    warmup_runs = prog.get<int>("--warmup_runs");
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
-    if (argc > 1)
-        N = atoi(argv[1]);
-    if (argc > 2)
-        timed_runs = atoi(argv[2]);
-    if (argc > 3)
-        warmup_runs = atoi(argv[3]);
-    printf("N:%d timed_runs:%d warmup_runs:%d\n", N, timed_runs, warmup_runs);
+    parse_args(argc, argv);
 
     h_in.resize(N);
     Randomizer<float> rand(-1.0f, 1.0f);
@@ -156,11 +164,7 @@ int main(int argc, char *argv[]) {
     }
 
     check_runtime_api(hipMemcpy(d_in, h_in.data(), N * sizeof(float), hipMemcpyHostToDevice));
-    auto check_result = [&]() {
-        auto ret = validate(&h_out, d_out, 1);
-        check_runtime_api(hipMemset(d_out, 0, sizeof(float)));
-        return ret;
-    };
+    auto check_result = [&] { return validate_all(&h_out, d_out, 1); };
 
     size_t bytes = N * sizeof(float);
     size_t flops = N;

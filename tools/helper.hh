@@ -2,6 +2,7 @@
 #include <functional>
 #include <hip/hip_runtime.h>
 #include <hip/hip_runtime_api.h>
+#include <hip/hip_cooperative_groups.h>
 #include <iostream>
 #include <random>
 #include <vector>

@@ -1,5 +1,5 @@
+#include <3rdparty/argparse.hpp>
 #include <tools/helper.hh>
-#include <type_traits>
 #include <vector>
 
 float alpha = 2.0f;
@@ -9,9 +9,9 @@ std::vector<float> h_out;
 float *d_in;
 float *d_out;
 
-int N           = 65536;
-int timed_runs  = 20;
-int warmup_runs = 5;
+int N;
+int timed_runs;
+int warmup_runs;
 
 constexpr int ThreadsPerBlock = 256;
 int NUM_SM                    = 0;
@@ -74,18 +74,41 @@ void run_baseline() {
     }
     printf("Baseline: %f ms\n", ms / timed_runs);
 }
-int main(int argc, char *argv[]) {
+
+int parse_args(int argc, char *argv[]) {
+    argparse::ArgumentParser prog("ax");
+    prog.add_argument("-n", "--size").help("vector size").required().scan<'i', int>();
+    prog.add_argument("-t", "--timed_runs")
+        .help("number of timed runs")
+        .default_value(20)
+        .scan<'i', int>();
+    prog.add_argument("-w", "--warmup_runs")
+        .help("number of warmup runs")
+        .default_value(10)
+        .scan<'i', int>();
+    prog.add_argument("-d", "--device")
+        .help("which device to use")
+        .default_value(0)
+        .scan<'i', int>();
+    try {
+        prog.parse_args(argc, argv);
+    } catch (const std::exception &err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << prog;
+        exit(1);
+    }
+    N           = prog.get<int>("--size");
+    timed_runs  = prog.get<int>("--timed_runs");
+    warmup_runs = prog.get<int>("--warmup_runs");
+
     hipDeviceProp_t props;
-    check_runtime_api(hipGetDeviceProperties(&props, 0));
+    check_runtime_api(hipGetDeviceProperties(&props, prog.get<int>("--device")));
     NUM_SM = props.multiProcessorCount;
-    printf("NUM_SM=%d\n", NUM_SM);
-    if (argc > 1)
-        N = atoi(argv[1]);
-    if (argc > 2)
-        timed_runs = atoi(argv[2]);
-    if (argc > 3)
-        warmup_runs = atoi(argv[3]);
-    printf("N:%d timed_runs:%d warmup_runs:%d\n", N, timed_runs, warmup_runs);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    parse_args(argc, argv);
     h_in.resize(N);
     h_out.resize(N);
     Randomizer<float> rand(-1.0f, 1.0f);
@@ -101,11 +124,7 @@ int main(int argc, char *argv[]) {
     size_t flops = N;
     Profiler profiler(timed_runs, warmup_runs);
 
-    auto check_result = [&]() {
-        auto ret = validate(h_out.data(), d_out, h_out.size());
-        check_runtime_api(hipMemset(d_out, 0, N * sizeof(float)));
-        return ret;
-    };
+    auto check_result = [&] { return validate_all(h_out.data(), d_out, h_out.size()); };
 
     profiler.add(
         "SaxVec1",
