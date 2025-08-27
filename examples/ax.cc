@@ -54,19 +54,20 @@ __global__ void pkSax(const float *in, float *out, size_t size, float alpha) {
     }
 }
 
-template <int ThreadsPerBlock, int VecSize = 1>
+template <int ThreadsPerBlock>
 __global__ void kSax_buf(float *in, float *out, size_t size, float alpha) {
+    constexpr auto VecSize = 4;
     typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
-    BufferResource<float, VecSize> buf(reinterpret_cast<uint64_t>(in), sizeof(float) * size);
-    BufferResource<float, VecSize> buf_out(reinterpret_cast<uint64_t>(out), sizeof(float) * size);
+    BufferResource<float> buf(reinterpret_cast<uint64_t>(in), sizeof(float) * size);
     float r_in[VecSize], r_out[VecSize];
     auto tid                         = blockIdx.x * blockDim.x + threadIdx.x;
-    *reinterpret_cast<vXf32 *>(r_in) = buf.load(tid * sizeof(float) * VecSize, 0, 0);
+    *reinterpret_cast<vXf32 *>(r_in) = buf.load_x4(tid * sizeof(float) * VecSize, 0, 0);
 #pragma unroll
     for (int j = 0; j < VecSize; j++) {
         r_out[j] = alpha * r_in[j];
     }
-    buf_out.store(*reinterpret_cast<vXf32 *>(r_out), tid * sizeof(float) * VecSize, 0, 0);
+    buf.desc.base_addr_ = reinterpret_cast<uint64_t>(out);
+    buf.store_x4(*reinterpret_cast<vXf32 *>(r_out), tid * sizeof(float) * VecSize, 0, 0);
 }
 
 void sax(const float *in, float *out, int size) {
@@ -143,16 +144,6 @@ int parse_args(int argc, char *argv[]) {
         },                                                                                         \
         check_result, bytes, flops);
 
-#define REGISTER_SAX_BUF(name, vec_size)                                                           \
-    profiler.add(                                                                                  \
-        name,                                                                                      \
-        [&]() {                                                                                    \
-            constexpr auto VecSize = vec_size;                                                     \
-            kSax_buf<ThreadsPerBlock, VecSize>                                                     \
-                <<<divUp(N, ThreadsPerBlock * VecSize), ThreadsPerBlock>>>(d_in, d_out, N, alpha); \
-        },                                                                                         \
-        check_result, bytes, flops);
-
 int main(int argc, char *argv[]) {
     parse_args(argc, argv);
     h_in.resize(N);
@@ -177,10 +168,14 @@ int main(int argc, char *argv[]) {
     REGISTER_SAX("SaxVec2", 2);
     REGISTER_SAX("SaxVec4", 4);
     REGISTER_PSAX("PSaxVec1", 1);
-    REGISTER_PSAX("PSaxVec2", 2);
     REGISTER_PSAX("PSaxVec4", 4);
-    REGISTER_SAX_BUF("SaxBufVec2", 2);
-    REGISTER_SAX_BUF("SaxBufVec4", 4);
+    profiler.add(
+        "SaxBuf",
+        [&]() {
+            kSax_buf<ThreadsPerBlock>
+                <<<divUp(N, ThreadsPerBlock * 4), ThreadsPerBlock>>>(d_in, d_out, N, alpha);
+        },
+        check_result, bytes, flops);
     RocBlasLv1<float> rocblas;
     profiler.add("rocBLAS", [&] { rocblas.scale(N, &alpha, d_out, 1); }, nullptr, bytes, flops);
     profiler.runAll();

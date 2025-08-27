@@ -107,10 +107,12 @@ struct RawBufferInstruction {
 };
 
 /// @brief A wrapper of buffer resource for raw buffer load/store instructions
-template <typename T, int VecSize = 1, bool AddTid = false>
+template <typename T>
 union BufferResource {
-    using Instr = RawBufferInstruction<T, VecSize>;
-    typedef T VT __attribute__((ext_vector_type(VecSize)));
+    typedef T v1T;
+    typedef T v2T __attribute__((ext_vector_type(2)));
+    typedef T v4T __attribute__((ext_vector_type(4)));
+
     constexpr static int NUM_FORMAT = (std::is_same_v<T, float> ? 7 : (
                                        std::is_same_v<T, int> ? 5 :(
                                        std::is_same_v<T, uint> ? 4 : 0))
@@ -134,17 +136,28 @@ union BufferResource {
     /// @param voffset vector offset in bytes from VGPR
     /// @param soffset scalar offset in bytes from SGPR
     /// @param aux     auxiliary GLC/SLC control, GLC: 1, SLC: 2, default: 0
-    INTRISIC VT load(int voffset, int soffset, int aux = 0) const {
-        return Instr{}.load(content, voffset, soffset, aux);
+    INTRISIC v1T load_x1(int voffset, int soffset, int aux = 0) const {
+        return RawBufferInstruction<T, 1>{}.load(content, voffset, soffset, aux);
     }
-
+    INTRISIC v2T load_x2(int voffset, int soffset, int aux = 0) const {
+        return RawBufferInstruction<T, 2>{}.load(content, voffset, soffset, aux);
+    }
+    INTRISIC v4T load_x4(int voffset, int soffset, int aux = 0) const {
+        return RawBufferInstruction<T, 4>{}.load(content, voffset, soffset, aux);
+    }
     /// @brief Store a vector to the buffer
     /// @param data    data to store
     /// @param voffset vector offset in bytes from VGPR
     /// @param soffset scalar offset in bytes from SGPR
     /// @param aux     auxiliary GLC/SLC control, GLC: 1, SLC: 2, default: 0
-    INTRISIC void store(VT data, int voffset, int soffset, int aux) const {
-        return Instr{}.store(data, content, voffset, soffset, aux);
+    INTRISIC void store(v1T data, int voffset, int soffset, int aux) const {
+        return RawBufferInstruction<T, 1>{}.store(data, content, voffset, soffset, aux);
+    }
+    INTRISIC void store_x2(v2T data, int voffset, int soffset, int aux) const {
+        return RawBufferInstruction<T, 2>{}.store(data, content, voffset, soffset, aux);
+    }
+    INTRISIC void store_x4(v4T data, int voffset, int soffset, int aux) const {
+        return RawBufferInstruction<T, 4>{}.store(data, content, voffset, soffset, aux);
     }
 };
 
