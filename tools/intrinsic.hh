@@ -11,6 +11,8 @@ typedef float v4f32 __attribute__((ext_vector_type(4)));
 typedef float v2f32 __attribute__((ext_vector_type(2)));
 typedef float v1f32;
 
+/// @brief No operation (NOP) instruction
+/// @tparam cycles Number of cycles to wait, valid range: 1~255
 template <int cycles>
 INTRISIC void __nop() { asm volatile("s_nop %[cyc]" : : [cyc] "i"(cycles)); }
 
@@ -79,6 +81,9 @@ __asm("llvm.amdgcn.raw.buffer.store.v2f32");
 INTRISIC void amdgcn_raw_buffer_store_v1f32(v1f32 data, v4i32 rsrc, int voffset, int soffset, int aux) 
 __asm("llvm.amdgcn.raw.buffer.store.v1f32");
 
+/// @brief Select raw buffer load/store instruction based on data type and vector size
+/// @tparam T        Data type, float or int
+/// @tparam VecSize Vector size, 1, 2, or 4
 template <typename T, int VecSize = 1>
 struct RawBufferInstruction {
     typedef T VT __attribute__((ext_vector_type(VecSize)));
@@ -145,12 +150,13 @@ union BufferResource {
     INTRISIC v4T load_x4(int voffset, int soffset, int aux = 0) const {
         return RawBufferInstruction<T, 4>{}.load(content, voffset, soffset, aux);
     }
+
     /// @brief Store a vector to the buffer
     /// @param data    data to store
     /// @param voffset vector offset in bytes from VGPR
     /// @param soffset scalar offset in bytes from SGPR
     /// @param aux     auxiliary GLC/SLC control, GLC: 1, SLC: 2, default: 0
-    INTRISIC void store(v1T data, int voffset, int soffset, int aux) const {
+    INTRISIC void store_x1(v1T data, int voffset, int soffset, int aux) const {
         return RawBufferInstruction<T, 1>{}.store(data, content, voffset, soffset, aux);
     }
     INTRISIC void store_x2(v2T data, int voffset, int soffset, int aux) const {
@@ -181,6 +187,8 @@ struct SchedBarrier {
         DS_WRITE       = 0x200,
         TRANSCENDENTAL = 0x400,
     };
+    /// @brief Allow specific instruction type to be scheduled after this barrier
+    /// @param mask Bitmask of allowed instruction types to be scheduled after this barrier
     template <int mask> INTRISIC void allow() { __builtin_amdgcn_sched_barrier(mask); }
 };
 // clang-format on
