@@ -16,6 +16,15 @@ typedef float v1f32;
 template <int cycles>
 INTRISIC void __nop() { asm volatile("s_nop %[cyc]" : : [cyc] "i"(cycles)); }
 
+template <int CNT = 0>
+INTRISIC void __waitcnt_lgkmcnt() { asm volatile("s_waitcnt lgkmcnt(%0)" : : "i"(CNT)); }
+
+template <int CNT = 0>
+INTRISIC void __waitcnt_vmcnt() { asm volatile("s_waitcnt vmcnt(%0)" : : "i"(CNT)); }
+
+template <int CNT = 0>
+INTRISIC void __waitcnt_expcnt() { asm volatile("s_waitcnt expcnt(%0)" : : "i"(CNT)); }
+
 /// ==============================================================================
 /// Data Parallel Primitives (DPP)
 /// ==============================================================================
