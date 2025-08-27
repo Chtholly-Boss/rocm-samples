@@ -1,45 +1,24 @@
 #pragma once
 #include <hip/hip_runtime.h>
 // clang-format off
+#define INTRISIC __device__ __forceinline__
+
+typedef int   v4i32 __attribute__((ext_vector_type(4)));
+typedef int   v2i32 __attribute__((ext_vector_type(2)));
+typedef int   v1i32;
+
+typedef float v4f32 __attribute__((ext_vector_type(4)));
+typedef float v2f32 __attribute__((ext_vector_type(2)));
+typedef float v1f32;
+
 template <int cycles>
-__device__ __forceinline__ void __nop() { asm volatile("s_nop %[cyc]" : : [cyc] "i"(cycles)); }
+INTRISIC void __nop() { asm volatile("s_nop %[cyc]" : : [cyc] "i"(cycles)); }
 
-__device__ int4 amdgcn_raw_buffer_load_v4i32(int4 rsrc, int voffset, int soffset, int aux) 
-__asm("llvm.amdgcn.raw.buffer.load.v4i32");
+/// ==============================================================================
+/// Data Parallel Primitives (DPP)
+/// ==============================================================================
 
-__device__ void amdgcn_raw_buffer_store_v4i32(int4 data, int4 rsrc, int voffset, int soffset, int aux) 
-__asm("llvm.amdgcn.raw.buffer.store.v4i32");
-
-__device__ float4 amdgcn_raw_buffer_load_v4f32(int4 rsrc, int voffset, int soffset, int aux) 
-__asm("llvm.amdgcn.raw.buffer.load.v4f32");
-
-__device__ void amdgcn_raw_buffer_store_v4f32(float4 data, int4 rsrc, int voffset, int soffset, int aux) 
-__asm("llvm.amdgcn.raw.buffer.store.v4f32");
-
-/// See ISA Chapter [Vector Memory Operations: Vector Memory Buffer Instructions]
-union BufferResource {
-    static constexpr unsigned kDataFormatU32Config = 4 << 15;
-    enum { kNone = 0, kGLCBit = 1 << 0, kSLCBit = 1 << 1 };
-
-    int4 content;
-    struct {
-        uintptr_t ptr;
-        unsigned range;
-        unsigned config;
-    } v;
-
-    __device__ __forceinline__ uint4 load(int voffset, int soffset, int aux) const {
-        int4 v = amdgcn_raw_buffer_load_v4i32(content, voffset, soffset, aux);
-        return *reinterpret_cast<const uint4 *>(&v);
-    }
-
-    __device__ __forceinline__ void store(int voffset, int soffset, int aux, uint4 data) const {
-        int4 v = *reinterpret_cast<const int4 *>(&data);
-        amdgcn_raw_buffer_store_v4i32(v, content, voffset, soffset, aux);
-    }
-};
-
-__device__ __forceinline__ void __v_add_f32_dpp_shr(float &dst, const float &src0, const float &src1, int row_shr,
+INTRISIC void __v_add_f32_dpp_shr(float &dst, const float &src0, const float &src1, int row_shr,
                                                     int row_mask = 0xf, int bank_mask = 0xf, int bound_ctrl = 1) {
     asm volatile("v_add_f32_dpp %[dst], %[src0], %[src1], row_shr:%[row_shr], row_mask:%[row_mask], "
                  "bank_mask:%[bank_mask], bound_ctrl:%[bound_ctrl]"
@@ -48,7 +27,7 @@ __device__ __forceinline__ void __v_add_f32_dpp_shr(float &dst, const float &src
                    [bank_mask] "i"(bank_mask), [bound_ctrl] "i"(bound_ctrl));
 }
 
-__device__ __forceinline__ void __v_add_f32_dpp_bcast(float &dst, const float &src0, const float &src1, 
+INTRISIC void __v_add_f32_dpp_bcast(float &dst, const float &src0, const float &src1, 
                                                       int row_bcast, int row_mask = 0xf, int bank_mask = 0xf, int bound_ctrl = 1) {
     asm volatile("v_add_f32_dpp %[dst], %[src0], %[src1], row_bcast:%[row_bcast], row_mask:%[row_mask], "
                  "bank_mask:%[bank_mask], bound_ctrl:%[bound_ctrl]"
@@ -57,8 +36,124 @@ __device__ __forceinline__ void __v_add_f32_dpp_bcast(float &dst, const float &s
                    [bank_mask] "i"(bank_mask), [bound_ctrl] "i"(bound_ctrl));
 }
 
+/// ==============================================================================
+/// Vector Memory Buffer Instructions and Buffer Resource Descriptor
+/// @see ISA Chapter [Vector Memory Operations: Vector Memory Buffer Instructions]
+/// ==============================================================================
+
+/// @see https://github.com/microsoft/llvm/blob/master/test/CodeGen/AMDGPU/llvm.amdgcn.raw.buffer.load.ll
+
+INTRISIC v4i32 amdgcn_raw_buffer_load_v4i32(v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.load.v4i32");
+
+INTRISIC v2i32 amdgcn_raw_buffer_load_v2i32(v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.load.v2i32");
+
+INTRISIC v1i32 amdgcn_raw_buffer_load_v1i32(v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.load.v1i32");
+
+INTRISIC void amdgcn_raw_buffer_store_v4i32(v4i32 data, v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.store.v4i32");
+
+INTRISIC void amdgcn_raw_buffer_store_v2i32(v2i32 data, v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.store.v2i32");
+
+INTRISIC void amdgcn_raw_buffer_store_v1i32(v1i32 data, v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.store.v1i32");
+
+INTRISIC v4f32 amdgcn_raw_buffer_load_v4f32(v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.load.v4f32");
+
+INTRISIC v2f32 amdgcn_raw_buffer_load_v2f32(v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.load.v2f32");
+
+INTRISIC v1f32 amdgcn_raw_buffer_load_v1f32(v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.load.v1f32");
+
+INTRISIC void amdgcn_raw_buffer_store_v4f32(v4f32 data, v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.store.v4f32");
+
+INTRISIC void amdgcn_raw_buffer_store_v2f32(v2f32 data, v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.store.v2f32");
+
+INTRISIC void amdgcn_raw_buffer_store_v1f32(v1f32 data, v4i32 rsrc, int voffset, int soffset, int aux) 
+__asm("llvm.amdgcn.raw.buffer.store.v1f32");
+
+template <typename T, int VecSize = 1>
+struct RawBufferInstruction {
+    typedef T VT __attribute__((ext_vector_type(VecSize)));
+    INTRISIC VT load(v4i32 rsrc, int voffset, int soffset, int aux = 0) const {
+        if constexpr (std::is_same_v<T, float>) {
+            if constexpr (VecSize == 4)      return amdgcn_raw_buffer_load_v4f32(rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 2) return amdgcn_raw_buffer_load_v2f32(rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 1) return amdgcn_raw_buffer_load_v1f32(rsrc, voffset, soffset, aux);
+        } else if constexpr (std::is_same_v<T, int>) {
+            if constexpr (VecSize == 4)      return amdgcn_raw_buffer_load_v4i32(rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 2) return amdgcn_raw_buffer_load_v2i32(rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 1) return amdgcn_raw_buffer_load_v1i32(rsrc, voffset, soffset, aux);
+        }
+    }
+    INTRISIC void store(VT data, v4i32 rsrc, int voffset, int soffset, int aux = 0) const {
+        if constexpr (std::is_same_v<T, float>) {
+            if constexpr (VecSize == 4)      amdgcn_raw_buffer_store_v4f32(data, rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 2) amdgcn_raw_buffer_store_v2f32(data, rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 1) amdgcn_raw_buffer_store_v1f32(data, rsrc, voffset, soffset, aux);
+        } else if constexpr (std::is_same_v<T, int>) {
+            if constexpr (VecSize == 4)      amdgcn_raw_buffer_store_v4i32(data, rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 2) amdgcn_raw_buffer_store_v2i32(data, rsrc, voffset, soffset, aux);
+            else if constexpr (VecSize == 1) amdgcn_raw_buffer_store_v1i32(data, rsrc, voffset, soffset, aux);
+        }
+    }
+};
+
+/// @brief A wrapper of buffer resource for raw buffer load/store instructions
+template <typename T, int VecSize = 1, bool AddTid = false>
+union BufferResource {
+    using Instr = RawBufferInstruction<T, VecSize>;
+    typedef T VT __attribute__((ext_vector_type(VecSize)));
+    constexpr static int NUM_FORMAT = (std::is_same_v<T, float> ? 7 : (
+                                       std::is_same_v<T, int> ? 5 :(
+                                       std::is_same_v<T, uint> ? 4 : 0))
+                                    ) << 12;
+    constexpr static int DATA_FORMAT = 4 << 15; // 1 field with 4 bytes: U32/S32/F32
+
+    v4i32 content;
+    struct {
+        uint64_t base_addr_;        // in bytes
+        uint32_t range_;            // in bytes
+        uint32_t other_;
+    } desc;
+
+    INTRISIC BufferResource(uint64_t base_addr, uint32_t range) {
+        desc.base_addr_ = base_addr;
+        desc.range_     = range;
+        desc.other_     = NUM_FORMAT | DATA_FORMAT;
+    }
+
+    /// @brief Load a vector from the buffer
+    /// @param voffset vector offset in bytes from VGPR
+    /// @param soffset scalar offset in bytes from SGPR
+    /// @param aux     auxiliary GLC/SLC control, GLC: 1, SLC: 2, default: 0
+    INTRISIC VT load(int voffset, int soffset, int aux = 0) const {
+        return Instr{}.load(content, voffset, soffset, aux);
+    }
+
+    /// @brief Store a vector to the buffer
+    /// @param data    data to store
+    /// @param voffset vector offset in bytes from VGPR
+    /// @param soffset scalar offset in bytes from SGPR
+    /// @param aux     auxiliary GLC/SLC control, GLC: 1, SLC: 2, default: 0
+    INTRISIC void store(VT data, int voffset, int soffset, int aux) const {
+        return Instr{}.store(data, content, voffset, soffset, aux);
+    }
+};
+
+/// ==============================================================================
+/// Sched Barrier
+/// @see https://llvm.org/docs/AMDGPUUsage.html#llvm-ir-intrinsics
+/// ==============================================================================
+
 struct SchedBarrier {
-    // see https://llvm.org/docs/AMDGPUUsage.html : llvm.amdgcn.sched.barrier
     enum {
         NONE           = 0x0,
         ALU            = 0x1,
@@ -73,6 +168,6 @@ struct SchedBarrier {
         DS_WRITE       = 0x200,
         TRANSCENDENTAL = 0x400,
     };
-    template <int mask> __device__ __forceinline__ void allow() { __builtin_amdgcn_sched_barrier(mask); }
+    template <int mask> INTRISIC void allow() { __builtin_amdgcn_sched_barrier(mask); }
 };
 // clang-format on

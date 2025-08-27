@@ -29,7 +29,7 @@ __host__ __device__ __forceinline__ auto divUp(auto a, auto b) { return (a + b -
 /// @return True if the output data matches the reference data within the given tolerances, false
 /// otherwise.
 template <typename HT, typename DT>
-bool validate_all(HT *h_ref, DT *d_out, size_t size, double atol = 1, double rtol = 1e-2) {
+bool validate_all(HT *h_ref, DT *d_out, size_t size, double atol = 1e-2, double rtol = 1e-2) {
     auto h_out = (DT *)malloc(size * sizeof(DT));
     check_runtime_api(hipMemcpy(h_out, d_out, size * sizeof(DT), hipMemcpyDeviceToHost));
     for (size_t i = 0; i < size; i++) {
@@ -133,14 +133,15 @@ class Profiler {
         size_t flops;
     };
     std::vector<Func> funcs;
+    std::function<void()> reset_func;
     int timed_runs_;
     int warmup_runs_;
     GPUTimer timer_;
     size_t l2_size_;
 
   public:
-    Profiler(int timed_runs = 10, int warmup_runs = 2)
-        : timed_runs_(timed_runs), warmup_runs_(warmup_runs) {
+    Profiler(int timed_runs = 10, int warmup_runs = 2, std::function<void()> reset_func = nullptr)
+        : timed_runs_(timed_runs), warmup_runs_(warmup_runs), reset_func(reset_func) {
         hipDeviceProp_t props;
         check_runtime_api(hipGetDeviceProperties(&props, 0));
         l2_size_ = props.l2CacheSize;
