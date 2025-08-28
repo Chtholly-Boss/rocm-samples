@@ -54,7 +54,7 @@ template <typename T> class RocSparseCsrMV {
   public:
     RocSparseCsrMV() {
         check_rocsparse_api(rocsparse_create_handle(&handle_));
-        check_rocsparse_api(rocsparse_set_pointer_mode(handle_, rocsparse_pointer_mode_device));
+        check_rocsparse_api(rocsparse_set_pointer_mode(handle_, rocsparse_pointer_mode_host));
         check_rocsparse_api(rocsparse_create_mat_descr(&descr_));
         check_rocsparse_api(rocsparse_create_mat_info(&info_));
     }
