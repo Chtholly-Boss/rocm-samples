@@ -17,6 +17,10 @@
         }                                                                                          \
     }
 
+#define H2D hipMemcpyHostToDevice
+#define D2H hipMemcpyDeviceToHost
+#define D2D hipMemcpyDeviceToDevice
+
 __host__ __device__ __forceinline__ auto divUp(auto a, auto b) { return (a + b - 1) / b; }
 
 /// @brief Validate the output data on device against the reference data on host using element-wise

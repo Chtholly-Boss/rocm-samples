@@ -140,8 +140,8 @@ union BufferResource {
         uint32_t other_;
     } desc;
 
-    INTRISIC BufferResource(uint64_t base_addr, uint32_t range) {
-        desc.base_addr_ = base_addr;
+    INTRISIC BufferResource(void* base_addr, uint32_t range) {
+        desc.base_addr_ = reinterpret_cast<uint64_t>(base_addr);
         desc.range_     = range;
         desc.other_     = NUM_FORMAT | DATA_FORMAT;
     }

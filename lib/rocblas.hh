@@ -23,7 +23,7 @@ template <typename T> class RocBlasLv1 {
         static_assert(std::is_same_v<ValueT, float> || std::is_same_v<ValueT, double>,
                       "Type not supported");
         check_rocblas_api(rocblas_create_handle(&handle_));
-        check_rocblas_api(rocblas_set_pointer_mode(handle_, rocblas_pointer_mode_host));
+        check_rocblas_api(rocblas_set_pointer_mode(handle_, rocblas_pointer_mode_device));
     };
     ~RocBlasLv1() { check_rocblas_api(rocblas_destroy_handle(handle_)); }
 
