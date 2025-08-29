@@ -16,10 +16,11 @@ int N;
 int timed_runs;
 int warmup_runs;
 
-constexpr int ThreadsPerBlock = 256;
+constexpr int ThreadsPerBlock = 1024;
 
 template <int ThreadsPerBlock, int VecSize = 1>
-__global__ void kScale(const float *in, float *out, size_t size, const float *alpha) {
+__global__ __launch_bounds__(ThreadsPerBlock) void kScale(const float *in, float *out, size_t size,
+                                                          const float *alpha) {
     typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
     auto tid     = blockIdx.x * blockDim.x + threadIdx.x;
     auto alpha_v = *alpha;
@@ -35,7 +36,8 @@ __global__ void kScale(const float *in, float *out, size_t size, const float *al
 }
 
 template <int ThreadsPerBlock>
-__global__ void kScale_buf(float *in, float *out, size_t size, const float *alpha) {
+__global__ __launch_bounds__(ThreadsPerBlock) void kScale_buf(float *in, float *out, size_t size,
+                                                              const float *alpha) {
     constexpr auto VecSize = 4;
     typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
     BufferResource<float> buf(in, sizeof(float) * size);
@@ -51,6 +53,36 @@ __global__ void kScale_buf(float *in, float *out, size_t size, const float *alph
     }
     buf.desc.base_addr_ = reinterpret_cast<uint64_t>(out);
     buf.store_x4(*reinterpret_cast<vXf32 *>(r_out), tid * sizeof(float) * VecSize, 0, 0);
+}
+
+template <int ThreadsPerBlock>
+__global__ __launch_bounds__(ThreadsPerBlock) void pkScale_buf(float *in, float *out, size_t size,
+                                                               const float *alpha) {
+    constexpr auto VecSize = 4;
+    typedef float vXf32 __attribute__((ext_vector_type(VecSize)));
+    BufferResource<float> buf(in, sizeof(float) * size);
+    BufferResource<float> obuf(out, sizeof(float) * size);
+
+    auto bid = blockIdx.x;
+    auto tid = threadIdx.x;
+
+    auto numel   = divUp(size, gridDim.x);
+    auto voffset = tid * VecSize * sizeof(float);
+
+    float r_in[VecSize], r_out[VecSize];
+
+    auto alpha_v = *alpha;
+
+    for (int i = 0; i < numel; i += ThreadsPerBlock * VecSize) {
+        *reinterpret_cast<vXf32 *>(r_in) =
+            buf.load_x4(voffset, (bid * numel + i) * sizeof(float), 0);
+#pragma unroll
+        for (int j = 0; j < VecSize; j++) {
+            r_out[j] = alpha_v * r_in[j];
+        }
+        obuf.store_x4(*reinterpret_cast<vXf32 *>(r_out), voffset, (bid * numel + i) * sizeof(float),
+                      0);
+    }
 }
 
 void sax(const float *in, float *out, int size) {
@@ -136,7 +168,10 @@ int main(int argc, char *argv[]) {
                 <<<divUp(N, ThreadsPerBlock * 4), ThreadsPerBlock>>>(d_in, d_out, N, d_alpha);
         },
         check_result, bytes, flops);
-
+    profiler.add(
+        "PersistentScaleBuf",
+        [&]() { pkScale_buf<ThreadsPerBlock><<<120, ThreadsPerBlock>>>(d_in, d_out, N, d_alpha); },
+        check_result, bytes, flops);
     profiler.runAll();
 
     {
